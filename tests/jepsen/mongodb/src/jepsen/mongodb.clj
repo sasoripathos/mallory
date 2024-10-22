@@ -103,7 +103,10 @@
             :generator (gen/phases
                          (->> (:generator workload)
                               (gen/stagger (/ (:rate opts)))
-                              (gen/nemesis (:generator nemesis))
+                              (gen/nemesis (gen/phases
+                                              (gen/sleep 5)
+                                              (:generator nemesis)
+                                            ))
                               (gen/time-limit (:time-limit opts))))})))
 
 (def cli-opts
