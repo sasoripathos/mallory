@@ -32,9 +32,8 @@
       ;; if there are removed members, add some back
       (let
         [
-          rnd (rand-int (+ cnt 1))  ;; rnd = 0 ~ cnt, cnt itself should be even
-          num (even? rnd rnd (+ rnd 1)) ;; if rnd is odd, add rnd + 1
-          ;; add number must be 0 ~ cnt and even
+          rnd (+ (rand-int cnt) 1)  ;; rnd = 1 ~ cnt, cnt itself should be even
+          num (if (even? rnd) rnd (+ rnd 1)) ;; ensure add > 0 and even
           target (take num (shuffle removed))
         ]
         ;; update status
@@ -66,9 +65,8 @@
       ;; if there are members available to remove, then do a random remove of even # of members
       (let
         [
-          rnd (rand-int (+ avail-cnt 1)) ;; rnd = 0 ~ avail-cnt
-          num (even? rnd rnd (- rnd 1)) ;; when rnd is odd, remove rnd - 1
-          ;; remove number must be 1 ~ avail-cnt and even
+          rnd (+ (rand-int avail-cnt) 1) ;; rnd = 1 ~ avail-cnt, where avail-cnt should be even
+          num (if (even? rnd) rnd (+ rnd 1)) ;; ensure remove > 0 and even
           target (take num (shuffle avail)) ;; randomly choose from nodes
         ]
         ;; update status
