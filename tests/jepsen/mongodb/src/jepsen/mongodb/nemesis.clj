@@ -9,7 +9,8 @@
             [jepsen.generator :as gen]
             [jepsen.nemesis [combined :as nc]
                             [time :as nt]]
-            [jepsen.mongodb.db :as db]))
+            [jepsen.mongodb [db :as db]
+                            [member-nem :as nemmember]]))
 
 (defn shard-generator
   "Takes a collection of shard packages, and returns a generator that emits ops
@@ -88,5 +89,7 @@
                   (update :faults set))]
     (-> (if (:sharded opts')
           (sharded-nemesis-package opts')
-          (nc/nemesis-package opts'))
+          ;; (nc/nemesis-package opts'))
+          ;; need to combine provided nemesis-package and member nemesis
+          (nc/compose-packages (concat (nc/nemesis-packages opts')  [(nemmember/member-package opts')]) ) )
         (update :generator (partial gen/delay (:interval opts))))))
