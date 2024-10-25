@@ -3,10 +3,10 @@
     (:require   [clojure.tools.logging :refer :all]
                 [clojure.set :as cset]
                 [jepsen [nemesis :as jnem]
-                        [net :as jnet]
-                        [util :as jutil]]
+                        [control :as jcontrol]
+                        [db :as db]]
                 [jepsen.generator :as jgen]
-                [jepsen.mongodb.db :as db]))
+                [jepsen.mongodb.db :as mdb]))
 
 
 ;; use a set to record the removed nodes
@@ -65,14 +65,18 @@
       ;; if there are members available to remove, then do a random remove of even # of members
       (let
         [
-          rnd (+ (rand-int avail-cnt) 1) ;; rnd = 1 ~ avail-cnt, where avail-cnt should be even
-          num (if (even? rnd) rnd (+ rnd 1)) ;; ensure remove > 0 and even
+          rnd (+ (rand-int avail-cnt) 1), ;; rnd = 1 ~ avail-cnt, where avail-cnt should be even
+          num (if (even? rnd) rnd (+ rnd 1)), ;; ensure remove > 0 and even
           target (take num (shuffle avail)) ;; randomly choose from nodes
+          replica-set-db (:db test)
         ]
         ;; update status
         (dosync (ref-set crashing-status (cset/union removed (set target))))
         (info "remove nodes " target " new crashing status is " (deref crashing-status))
-        ;; TODO: should just kill these nodes
+        ;; apply kill on all the targets
+        (jcontrol/on-nodes test target (partial db/kill! replica-set-db))
+        (Thread/sleep 5000)
+        (info "new primary is " (db/primaries replica-set-db test))
       )
       ;; otherwise, just not removing any node
       (info "Not removing any node")
@@ -127,8 +131,8 @@
   [opts]
   (let
     [
-      db (:db opts),
-      nodes (:nodes opts),
+      ;; db (:db opts),
+      ;; nodes (:nodes opts),
       rm (fn [_ _] {:type :info, :f :remove-members}),
       ad (fn [_ _] {:type :info, :f :add-members})
     ]
