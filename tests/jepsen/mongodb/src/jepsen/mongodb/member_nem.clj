@@ -1,6 +1,7 @@
 (ns jepsen.mongodb.member-nem
     "A nemesis about adding and removing members from replica set"
     (:require   [clojure.tools.logging :refer :all]
+                [clojure.set :as cset]
                 [jepsen [nemesis :as jnem]
                         [net :as jnet]
                         [util :as jutil]]
@@ -20,14 +21,14 @@
   As required by MongoDB, assume add even numbers of members.
   "
   [test]
-  (info targets "joining the replica set" )
+  (info "joining the replica set" )
   (let
     [
       removed (deref crashing-status) ;; removed count should always be even
       cnt (count removed)
     ]
 
-    (pos? cnt
+    (if (pos? cnt)
       ;; if there are removed members, add some back
       (let
         [
@@ -37,7 +38,7 @@
           target (take num (shuffle removed))
         ]
         ;; update status
-        (dosync (ref-set crashing-status (difference removed (set target))))
+        (dosync (ref-set crashing-status (cset/difference removed (set target))))
         (info "Add member " target " new crashing status is " (deref crashing-status))
         ;; TODO: add members as steps
       )
@@ -57,11 +58,11 @@
     [
       nodes (:nodes test), ;; all nodes in a test
       removed (deref crashing-status)
-      avail (difference (set nodes) removed), ;; still available nodes
+      avail (cset/difference (set nodes) removed), ;; still available nodes
       avail-cnt (- (count avail) 3) ;; # of nodes that can be removed
     ]
 
-    (pos? avail-cnt
+    (if (pos? avail-cnt)
       ;; if there are members available to remove, then do a random remove of even # of members
       (let
         [
@@ -71,7 +72,7 @@
           target (take num (shuffle avail)) ;; randomly choose from nodes
         ]
         ;; update status
-        (dosync (ref-set crashing-status (union removed (set target))))
+        (dosync (ref-set crashing-status (cset/union removed (set target))))
         (info "remove nodes " target " new crashing status is " (deref crashing-status))
         ;; TODO: should just kill these nodes
       )
@@ -101,12 +102,12 @@
 
   (reify
     ;; Reflection defines "What :f functions does this nemesis support?"
-    n/Reflection
-    (fs [_] [:add-member :remove-member]))
-
-    n/Nemesis
+    jnem/Reflection
+    (fs [_] [:add-member :remove-member])
+  
+    jnem/Nemesis
     ;; Setup the nemesis to work with the cluster. Returns the nemesis ready to be invoked.
-    (setup! [this test] (info node "Setting up member nemesis"))
+    (setup! [this test] (info "Setting up member nemesis"))
 
     ;; Invoke - perform acture add and remove of members
     (invoke! [this test op]
@@ -118,7 +119,8 @@
     ) 
 
     ;; Teardown the nemesis when work is complete
-    (teardown! [this test] (info node "Tearing down member nemesis"))
+    (teardown! [this test] (info "Tearing down member nemesis"))
+  )
 )
 
 
@@ -128,14 +130,14 @@
   (let
     [
       db (:db opts),
-      nodes: (:nodes opts),
+      nodes (:nodes opts),
       rm {:type :info, :f :remove-members},
       ad {:type :info, :f :add-members}
     ]
     ;; A simple logic is to remove -> add -> remove -> add .... repeat
     (->>
-      (gen/flip-flop rm ad)
-      (gen/stagger (:interval opts default-interval))
+      (jgen/flip-flop rm ad)
+      (jgen/stagger (:interval opts 10))
     )
   )
 )
