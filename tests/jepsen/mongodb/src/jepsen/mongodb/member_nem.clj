@@ -48,7 +48,7 @@
 )
 
 
-(defn force-remove-members
+(defn remove-members
   "Forcibly remove voting members from the replica set (i.e. kill mongod process) to simulate crashes
   As required by MongoDB, assume remove even numbers of members 
   "
@@ -103,18 +103,18 @@
   (reify
     ;; Reflection defines "What :f functions does this nemesis support?"
     jnem/Reflection
-    (fs [_] [:add-member :remove-member])
+    (fs [this] #{:add-members :remove-members})
   
     jnem/Nemesis
     ;; Setup the nemesis to work with the cluster. Returns the nemesis ready to be invoked.
-    (setup! [this test] (info "Setting up member nemesis"))
+    (setup! [this test] (info "Setting up member nemesis") this)
 
     ;; Invoke - perform acture add and remove of members
     (invoke! [this test op]
       (assoc op :value
         (case (:f op)
-          :add-member     (add-members test) ;; TODO
-          :remove-members   (force-remove-members test) ;; TODO
+          :add-members     (add-members test) ;; TODO
+          :remove-members   (remove-members test) ;; TODO
         ))
     ) 
 
@@ -131,8 +131,10 @@
     [
       db (:db opts),
       nodes (:nodes opts),
-      rm {:type :info, :f :remove-members},
-      ad {:type :info, :f :add-members}
+      ;; rm {:type :info, :f :remove-members, :value nil},
+      ;; ad {:type :info, :f :add-members, :value nil}
+      rm (fn [_ _] {:type :info, :f :remove-members, :value nil}),
+      ad (fn [_ _] {:type :info, :f :add-members, :value nil})
     ]
     ;; A simple logic is to remove -> add -> remove -> add .... repeat
     (->>
@@ -154,8 +156,8 @@
       :nemesis   (member-nemesis opts)
       :generator (member-generator opts)
       :perf      #{
-        {:name "add-members", :fs [:add-members], :color "#E9A0E6"}
-        {:name "remove-members", :fs [:force-remove-members], :color "#ACA0E9"}
-      }})
+        {:name "member", :start #{:remove-members}, :stop #{:add-members}, :color "#E9A0E6"}
+      }
+    })
 )
 
