@@ -7,21 +7,6 @@
                 [jepsen.generator :as jgen]
                 [jepsen.mongodb.db :as db]))
 
-(defn add-members
-  "Add voting members into the replica set.
-  As required by MongoDB, assume add even numbers of members.
-  "
-  [targets]
-  (info targets "joining the replica set" )
-)
-
-(defn force-remove-members
-  "Forcibly remove voting members from the replica set (i.e. kill mongod process) to simulate crashes
-  As required by MongoDB, assume remove even numbers of members 
-  "
-  [targets]
-  (info targets "leaving the replica set" )
-)
 
 ;; use a set to record the removed nodes
 (def crashing-status (
@@ -29,8 +14,74 @@
   ;; :validator pos? ;; there might need a validator
 )) 
 
-;; Only here can find all nodes at "test"
-;; then here is the place where we should tracking the removed nodes
+
+(defn add-members
+  "Add voting members into the replica set.
+  As required by MongoDB, assume add even numbers of members.
+  "
+  [test]
+  (info targets "joining the replica set" )
+  (let
+    [
+      removed (deref crashing-status) ;; removed count should always be even
+      cnt (count removed)
+    ]
+
+    (pos? cnt
+      ;; if there are removed members, add some back
+      (let
+        [
+          rnd (rand-int (+ cnt 1))  ;; rnd = 0 ~ cnt, cnt itself should be even
+          num (even? rnd rnd (+ rnd 1)) ;; if rnd is odd, add rnd + 1
+          ;; add number must be 0 ~ cnt and even
+          target (take num (shuffle removed))
+        ]
+        ;; update status
+        (dosync (ref-set crashing-status (difference removed (set target))))
+        (info "Add member " target " new crashing status is " (deref crashing-status))
+        ;; TODO: add members as steps
+      )
+      (info "No adding any member")
+    )
+  )
+)
+
+
+(defn force-remove-members
+  "Forcibly remove voting members from the replica set (i.e. kill mongod process) to simulate crashes
+  As required by MongoDB, assume remove even numbers of members 
+  "
+  [test]
+  (info "Start removing members")
+  (let
+    [
+      nodes (:nodes test), ;; all nodes in a test
+      removed (deref crashing-status)
+      avail (difference (set nodes) removed), ;; still available nodes
+      avail-cnt (- (count avail) 3) ;; # of nodes that can be removed
+    ]
+
+    (pos? avail-cnt
+      ;; if there are members available to remove, then do a random remove of even # of members
+      (let
+        [
+          rnd (rand-int (+ avail-cnt 1)) ;; rnd = 0 ~ avail-cnt
+          num (even? rnd rnd (- rnd 1)) ;; when rnd is odd, remove rnd - 1
+          ;; remove number must be 1 ~ avail-cnt and even
+          target (take num (shuffle avail)) ;; randomly choose from nodes
+        ]
+        ;; update status
+        (dosync (ref-set crashing-status (union removed (set target))))
+        (info "remove nodes " target " new crashing status is " (deref crashing-status))
+        ;; TODO: should just kill these nodes
+      )
+      ;; otherwise, just not removing any node
+      (info "Not removing any node")
+    )
+  )
+)
+
+
 (defn member-nemesis
   "A nemesis for adding and removing member from the replica set with only voting members.
   
@@ -62,35 +113,38 @@
       (assoc op :value
         (case (:f op)
           :add-member     (add-members test) ;; TODO
-          :remove-member   (force-remove-members test) ;; TODO
-        ))) 
+          :remove-members   (force-remove-members test) ;; TODO
+        ))
+    ) 
 
     ;; Teardown the nemesis when work is complete
-    (teardown! [this test] (info node "Setting up member nemesis"))
+    (teardown! [this test] (info node "Tearing down member nemesis"))
 )
 
-;; Only here can find all nodes at "test"
-;; then here is the place where we should tracking the removed nodes
+
 (defn member-generator
   "A generator for member nemesis."
   [opts]
-  (let [
-    db (:db opts),
-    
-    rm {:type :info, :f :force-remove-members, :value (rand-nth targets)}, ;; TODO - need to choose from available nodes
-    st {:type :info, :f :add-members, :value (rand-nth targets)}, ;; TODO - need to choose from removed nodes
-  ])
-  ;; A simple logic is to remove -> add -> remove -> add .... repeat
-  (->>
-    (gen/flip-flop rm st)
-    (gen/stagger (:interval opts default-interval))
+  (let
+    [
+      db (:db opts),
+      nodes: (:nodes opts),
+      rm {:type :info, :f :remove-members},
+      ad {:type :info, :f :add-members}
+    ]
+    ;; A simple logic is to remove -> add -> remove -> add .... repeat
+    (->>
+      (gen/flip-flop rm ad)
+      (gen/stagger (:interval opts default-interval))
+    )
   )
 )
 
 
 (defn member-package
   "A combined nemesis package for adding and removing members from/to the replica set."
-  ;; mongodb.clj line 67 sets most of input opts
+  ;; mongodb.clj line 67 sets most of input opts, specifically specified
+  ;; :db, :nodes, :faults, :interval, and targets for each nemesis
   [opts]
   ;; Only return when required, i.e. --nemesis member
   (when ((:faults opts) :member)
