@@ -57,11 +57,11 @@
   (let
     [
       nodes (:nodes test), ;; all nodes in a test
-      removed (deref crashing-status)
+      removed (deref crashing-status),
       avail (cset/difference (set nodes) removed), ;; still available nodes
       avail-cnt (- (count avail) 3) ;; # of nodes that can be removed
     ]
-
+    (info "have " avail-cnt "members can be removed. Current crashing status is ", removed)
     (if (pos? avail-cnt)
       ;; if there are members available to remove, then do a random remove of even # of members
       (let
@@ -131,10 +131,8 @@
     [
       db (:db opts),
       nodes (:nodes opts),
-      ;; rm {:type :info, :f :remove-members, :value nil},
-      ;; ad {:type :info, :f :add-members, :value nil}
-      rm (fn [_ _] {:type :info, :f :remove-members, :value nil}),
-      ad (fn [_ _] {:type :info, :f :add-members, :value nil})
+      rm (fn [_ _] {:type :info, :f :remove-members}),
+      ad (fn [_ _] {:type :info, :f :add-members})
     ]
     ;; A simple logic is to remove -> add -> remove -> add .... repeat
     (->>
