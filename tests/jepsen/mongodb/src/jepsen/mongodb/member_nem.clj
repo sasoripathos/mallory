@@ -19,7 +19,7 @@
 (defn grace-remove-cleanup
   "The kill didn't follow the remove procedure defined by mongodb, so follow the remaining step here before adding new members
   "
-  [nodes, removed]
+  [test, replica-set-db, nodes, removed]
   ;; Now add new members step by step
   ;; 1. the kill didn't follow the remove procedure defined by mongodb, so follow here
   (let
@@ -78,7 +78,7 @@
         (info "Add member " target " new crashing status is " (deref crashing-status))
         ;; Now add new members step by step
         ;; 1. the kill didn't follow the remove procedure defined by mongodb, so follow here
-        (grace-remove-cleanup nodes removed)
+        (grace-remove-cleanup test replica-set-db nodes removed)
         ;; 2. TODO: now (re)-add new members
         ;; (let
         ;;   [
