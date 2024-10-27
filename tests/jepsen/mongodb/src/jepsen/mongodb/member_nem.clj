@@ -6,7 +6,8 @@
                         [control :as jcontrol]
                         [db :as db]]
                 [jepsen.generator :as jgen]
-                [jepsen.mongodb.db :as mdb]))
+                [jepsen.mongodb [db :as mdb]
+                                [client :as mcl]]))
 
 
 ;; use a set to record the removed nodes
@@ -15,6 +16,40 @@
   ;; :validator pos? ;; there might need a validator
 )) 
 
+(defn grace-remove-cleanup
+  "The kill didn't follow the remove procedure defined by mongodb, so follow the remaining step here before adding new members
+  "
+  [nodes, removed]
+  ;; Now add new members step by step
+  ;; 1. the kill didn't follow the remove procedure defined by mongodb, so follow here
+  (let
+    [
+      cur_prim (->>
+        (cset/difference (set nodes) removed) ;; calculate remaining alive nodes
+        (assoc test :nodes) ;; for following code, we only need to check alive nodes
+        (db/primaries replica-set-db)
+        (first) ;; get only the first result
+      ) ;; determing current primary
+      port mcl/config-port
+      host-port-list (-> (fn [n] (str n ":" port))
+        (map removed)
+        vec
+      ) ;; get a vector of to removed
+    ]
+    (info "primary before add is " cur_prim)
+    (info "finish up remove before add on " host-port-list)
+    ;; let primary finish remaing remove steps
+    (with-open [ conn (mcl/open cur_prim port) ]
+      ;; the below command should act as rs.remove()
+      ;; This function will disconnect the shell briefly and forces a reconnection
+      ;; the shell will display an error even if this command succeeds
+      (try
+        (mcl/admin-command! conn { :dropConnections 1, :hostAndPort host-port-list })
+        (catch Exception e (info "drop should have completed") nil)
+      )
+    )
+  )
+)
 
 (defn add-members
   "Add voting members into the replica set.
@@ -32,14 +67,47 @@
       ;; if there are removed members, add some back
       (let
         [
-          rnd (+ (rand-int cnt) 1)  ;; rnd = 1 ~ cnt, cnt itself should be even
-          num (if (even? rnd) rnd (+ rnd 1)) ;; ensure add > 0 and even
-          target (take num (shuffle removed))
+          rnd (+ (rand-int cnt) 1),  ;; rnd = 1 ~ cnt, cnt itself should be even
+          num (if (even? rnd) rnd (+ rnd 1)), ;; ensure add > 0 and even
+          target (take num (shuffle removed)),
+          replica-set-db (:db test),
+          nodes (:nodes test)
         ]
         ;; update status
         (dosync (ref-set crashing-status (cset/difference removed (set target))))
         (info "Add member " target " new crashing status is " (deref crashing-status))
-        ;; TODO: add members as steps
+        ;; Now add new members step by step
+        ;; 1. the kill didn't follow the remove procedure defined by mongodb, so follow here
+        (grace-remove-cleanup nodes removed)
+        ;; 2. TODO: now (re)-add new members
+        ;; (let
+        ;;   [
+        ;;     cur_prim (->>
+        ;;       (cset/difference (set nodes) removed) ;; calculate remaining alive nodes
+        ;;       (assoc test :nodes) ;; for following code, we only need to check alive nodes
+        ;;       (db/primaries replica-set-db)
+        ;;       (first) ;; get only the first result
+        ;;     ) ;; determing current primary
+        ;;     port mcl/config-port
+        ;;     host-port-list (-> (fn [n] (str n ":" port))
+        ;;       (map removed)
+        ;;       vec
+        ;;     ) ;; get a vector of to removed
+        ;;   ]
+        ;;   (info "primary before add is " cur_prim)
+        ;;   (info "finish up remove before add on " host-port-list)
+        ;;   ;; let primary finish remaing remove steps
+        ;;   (with-open [ conn (mcl/open cur_prim port) ]
+        ;;     ;; the below command should act as rs.remove()
+        ;;     ;; This function will disconnect the shell briefly and forces a reconnection
+        ;;     ;; the shell will display an error even if this command succeeds
+        ;;     (try
+        ;;       (mcl/admin-command! conn { :dropConnections 1, :hostAndPort host-port-list })
+        ;;       (catch Exception e (info "drop should have completed") nil)
+        ;;     )
+        ;;   )
+        ;;   ;;
+        ;; )
       )
       (info "No adding any member")
     )
@@ -75,8 +143,9 @@
         (info "remove nodes " target " new crashing status is " (deref crashing-status))
         ;; apply kill on all the targets
         (jcontrol/on-nodes test target (partial db/kill! replica-set-db))
-        (Thread/sleep 5000)
-        (info "new primary is " (db/primaries replica-set-db test))
+        ;; seems below code cannot give primary, timeout when while waiting to connect
+        ;; (Thread/sleep 5000)
+        ;; (info "new primary is " (db/primaries replica-set-db test))
       )
       ;; otherwise, just not removing any node
       (info "Not removing any node")
