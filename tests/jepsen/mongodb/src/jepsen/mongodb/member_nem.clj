@@ -30,7 +30,7 @@
         (db/primaries replica-set-db)
         (first) ;; get only the first result
       ) ;; determing current primary
-      port mcl/config-port
+      port (if (mdb/config-server? test) mcl/config-port mcl/shard-port)
       host-port-list (-> (fn [n] (str n ":" port))
         (map removed)
         vec
@@ -40,6 +40,7 @@
     (info "finish up remove before add on " host-port-list)
     ;; let primary finish remaing remove steps
     (with-open [ conn (mcl/open cur_prim port) ]
+      ;; (info "Current config\n: "  (mcl/admin-command! conn { :replSetGetConfig 1 })) ;; get current config
       ;; the below command should act as rs.remove()
       ;; This function will disconnect the shell briefly and forces a reconnection
       ;; the shell will display an error even if this command succeeds
@@ -50,6 +51,37 @@
     )
   )
 )
+
+
+(defn add-with-reconfig
+  ""
+  [test, replica-set-db, nodes, target]
+  (let
+    [
+      primary (->>
+        (cset/difference (set nodes) target) ;; calculate remaining alive nodes
+        (assoc test :nodes) ;; for following code, we only need to check alive nodes
+        (db/primaries replica-set-db)
+        (first) ;; get only the first result
+      )
+      port (if (mdb/config-server? test) mcl/config-port mcl/shard-port)
+    ]
+    ;; db.adminCommand(
+    ;;   {
+    ;;     replSetGetConfig: 1,
+    ;;     commitmentStatus: <boolean>,
+    ;;     comment: <any>
+    ;;   }
+    ;; )
+    (info "New primary after rs.remove is " primary)
+    ;; (.close (mcl/await-open primary port)) ;; wait for primary to connect
+    (with-open [ conn (mcl/open primary port) ]
+      (info "Current config\n: "  (mcl/admin-command! conn { :replSetGetConfig 1 })) ;; get current config
+    )
+    
+  )
+)
+
 
 (defn add-members
   "Add voting members into the replica set.
@@ -79,35 +111,18 @@
         ;; Now add new members step by step
         ;; 1. the kill didn't follow the remove procedure defined by mongodb, so follow here
         (grace-remove-cleanup test replica-set-db nodes removed)
-        ;; 2. TODO: now (re)-add new members
-        ;; (let
-        ;;   [
-        ;;     cur_prim (->>
-        ;;       (cset/difference (set nodes) removed) ;; calculate remaining alive nodes
-        ;;       (assoc test :nodes) ;; for following code, we only need to check alive nodes
-        ;;       (db/primaries replica-set-db)
-        ;;       (first) ;; get only the first result
-        ;;     ) ;; determing current primary
-        ;;     port mcl/config-port
-        ;;     host-port-list (-> (fn [n] (str n ":" port))
-        ;;       (map removed)
-        ;;       vec
-        ;;     ) ;; get a vector of to removed
-        ;;   ]
-        ;;   (info "primary before add is " cur_prim)
-        ;;   (info "finish up remove before add on " host-port-list)
-        ;;   ;; let primary finish remaing remove steps
-        ;;   (with-open [ conn (mcl/open cur_prim port) ]
-        ;;     ;; the below command should act as rs.remove()
-        ;;     ;; This function will disconnect the shell briefly and forces a reconnection
-        ;;     ;; the shell will display an error even if this command succeeds
-        ;;     (try
-        ;;       (mcl/admin-command! conn { :dropConnections 1, :hostAndPort host-port-list })
-        ;;       (catch Exception e (info "drop should have completed") nil)
-        ;;     )
-        ;;   )
-        ;;   ;;
-        ;; )
+        ;; 2. now (re)-add new members
+        ;; 2.1 Make sure the new member's data directory does not contain data
+        (jcontrol/on-nodes test removed mdb/wipe!)
+        (info "Should have removed old data")
+        ;; 2.2 Add the new member into the replica set
+        (add-with-reconfig test replica-set-db nodes target)
+
+        ;; (configure! test node) ;; seems can skip config since it should have been setup properly
+        ;; (start! test node) ;;
+        ;; (join! test node)
+        ;; (jcontrol/on-nodes test target (partial db/kill! replica-set-db))
+
       )
       (info "No adding any member")
     )
