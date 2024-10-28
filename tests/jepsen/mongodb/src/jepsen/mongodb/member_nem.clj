@@ -106,6 +106,7 @@
           (conj (vec old-member-list))
         )
         ;; Construct new config
+        (info "New member list is: ", new-member-list)
         new-config {:_id id, :version new-version, :members new-member-list}
       ]
       (try
