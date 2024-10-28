@@ -106,9 +106,9 @@
           (conj (vec old-member-list))
         )
         ;; Construct new config
-        (info "New member list is: ", new-member-list)
         new-config {:_id id, :version new-version, :members new-member-list}
       ]
+      (info "New member list is: ", new-member-list)
       (try
         (mcl/admin-command! conn { :replSetReconfig new-config })
         (catch Exception e (info "Reconfig should have completed, the error is\n" e) nil)
