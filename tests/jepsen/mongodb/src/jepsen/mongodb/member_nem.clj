@@ -16,37 +16,92 @@
   ;; :validator pos? ;; there might need a validator
 )) 
 
+(def version-cnt (
+  ref #{} 
+  ;; :validator pos? ;; there might need a validator
+)) 
+
+(defn construct-config
+  "Construct a new config based on a old config
+
+  "
+  [test, members, old-config]
+
+  {
+    :_id (:replica-set-name test "rs_jepsen")
+    ;; :configsvr (mdb/config-server? test)
+    ;;  ; See https://docs.mongodb.com/manual/reference/replica-configuration/#rsconf.settings.catchUpTimeoutMillis
+    ;; :settings {
+    ;;   :heartbeatTimeoutSecs       1,
+    ;;   :electionTimeoutMillis      1000,
+    ;;   :catchUpTimeoutMillis       1000,
+    ;;   :catchUpTakeoverDelayMillis 3000
+    ;; }
+    ;; Each replica set member must have a unique _id. Avoid re-using _id values even if no members[n] entry is using that _id in the current configuration.
+    ;; Once set, you cannot change the _id of a member.    
+    :members (->>
+      members
+      (map-indexed (fn [i node]
+                                  {:_id  i
+                                   :priority (if (hidden node)
+                                               0
+                                               (- (count (:nodes test)) i))
+                                   :votes    (if (hidden node)
+                                               0
+                                               1)
+                                   :hidden   (boolean (hidden node))
+                                   :host     (str node ":"
+                                                  (if (config-server? test)
+                                                    client/config-port
+                                                    client/shard-port))})))}
+)
+
+
 (defn grace-remove-cleanup
   "The kill didn't follow the remove procedure defined by mongodb, so follow the remaining step here before adding new members
+  This function should emulate an admin maintaining process (i.e. has identified all failing nodes and performing updating)
   "
   [test, replica-set-db, nodes, removed]
-  ;; Now add new members step by step
-  ;; 1. the kill didn't follow the remove procedure defined by mongodb, so follow here
+  ;; According to Mongodb, it allows adding or removing no more than 1 voting member at a time. So perform one by one
   (let
     [
-      cur_prim (->>
-        (cset/difference (set nodes) removed) ;; calculate remaining alive nodes
-        (assoc test :nodes) ;; for following code, we only need to check alive nodes
-        (db/primaries replica-set-db)
-        (first) ;; get only the first result
-      ) ;; determing current primary
       port (if (mdb/config-server? test) mcl/config-port mcl/shard-port)
-      host-port-list (-> (fn [n] (str n ":" port))
-        (map removed)
-        vec
-      ) ;; get a vector of to removed
+      rm-seq (seq removed)
+      ;; live-members (cset/difference (set nodes) removed)
     ]
-    (info "primary before add is " cur_prim)
-    (info "finish up remove before add on " host-port-list)
-    ;; let primary finish remaing remove steps
-    (with-open [ conn (mcl/open cur_prim port) ]
-      ;; (info "Current config\n: "  (mcl/admin-command! conn { :replSetGetConfig 1 })) ;; get current config
-      ;; the below command should act as rs.remove()
-      ;; This function will disconnect the shell briefly and forces a reconnection
-      ;; the shell will display an error even if this command succeeds
-      (try
-        (mcl/admin-command! conn { :dropConnections 1, :hostAndPort host-port-list })
-        (catch Exception e (info "drop should have completed") nil)
+    (for [n rm-seq]
+      (let
+        [
+          cur_prim (->>
+            (cset/difference (set nodes) removed) ;; calculate remaining alive nodes
+            (assoc test :nodes) ;; for following code, we only need to check alive nodes
+            (db/primaries replica-set-db)
+            (first));; get only the first result
+        ]
+        (info "current primary is " cur_prim)
+        
+        (with-open [ conn (mcl/open cur_prim port) ]
+          (let
+            [
+              old-config (:config (mcl/admin-command! conn { :replSetGetConfig 1 }))
+              id (:_id old-config)
+              ;; new-version (+ (:version old-config) 1)
+              ;; TODO: get the member list by removing 1 member
+              new-members (vec (filter #(not= (:host %) n) (:members old-config)))
+              ;; TODO: construct new config
+              new-config {:_id id, :members new-members}
+            ]
+            ;; TODO: call reconfig
+            (try
+              ;; the below command should act as rs.remove()
+              ;; This function will disconnect the shell briefly and forces a reconnection
+              ;; the shell will display an error even if this command succeeds
+              (mcl/admin-command! conn { :replSetReconfig new-config })
+              (catch Exception e (info "Reconfig should have completed, the error is\n" e) nil)
+            )
+            (info "cleaned up for " n)
+          )
+        )
       )
     )
   )
@@ -65,7 +120,12 @@
         (first) ;; get only the first result
       )
       port (if (mdb/config-server? test) mcl/config-port mcl/shard-port)
+
     ]
+
+    ;; should 
+
+
     ;; db.adminCommand(
     ;;   {
     ;;     replSetGetConfig: 1,
@@ -73,11 +133,11 @@
     ;;     comment: <any>
     ;;   }
     ;; )
-    (info "New primary after rs.remove is " primary)
-    ;; (.close (mcl/await-open primary port)) ;; wait for primary to connect
-    (with-open [ conn (mcl/open primary port) ]
-      (info "Current config\n: "  (mcl/admin-command! conn { :replSetGetConfig 1 })) ;; get current config
-    )
+    ;; (info "New primary after rs.remove is " primary)
+    ;; ;; (.close (mcl/await-open primary port)) ;; wait for primary to connect
+    ;; (with-open [ conn (mcl/open primary port) ]
+    ;;   (info "Current config\n: "  (mcl/admin-command! conn { :replSetGetConfig 1 })) ;; get current config
+    ;; )
     
   )
 )
@@ -158,9 +218,6 @@
         (info "remove nodes " target " new crashing status is " (deref crashing-status))
         ;; apply kill on all the targets
         (jcontrol/on-nodes test target (partial db/kill! replica-set-db))
-        ;; seems below code cannot give primary, timeout when while waiting to connect
-        ;; (Thread/sleep 5000)
-        ;; (info "new primary is " (db/primaries replica-set-db test))
       )
       ;; otherwise, just not removing any node
       (info "Not removing any node")
@@ -193,7 +250,11 @@
   
     jnem/Nemesis
     ;; Setup the nemesis to work with the cluster. Returns the nemesis ready to be invoked.
-    (setup! [this test] (info "Setting up member nemesis") this)
+    (setup! [this test]
+      (info "Setting up member nemesis")
+      (dosync (ref-set version-cnt (count (:nodes test)))) ;; track the version number
+      this
+    )
 
     ;; Invoke - perform acture add and remove of members
     (invoke! [this test op]
