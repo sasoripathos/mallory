@@ -19,43 +19,12 @@
 (def version-cnt (
   ref 1 
   :validator pos? ;; there might need a validator
-)) 
+))
 
-(defn construct-config
-  "Construct a new config based on a old config
-
-  "
-  [test, members, old-config]
-
-  {
-    :_id (:replica-set-name test "rs_jepsen")
-    ;; :configsvr (mdb/config-server? test)
-    ;;  ; See https://docs.mongodb.com/manual/reference/replica-configuration/#rsconf.settings.catchUpTimeoutMillis
-    ;; :settings {
-    ;;   :heartbeatTimeoutSecs       1,
-    ;;   :electionTimeoutMillis      1000,
-    ;;   :catchUpTimeoutMillis       1000,
-    ;;   :catchUpTakeoverDelayMillis 3000
-    ;; }
-    ;; Each replica set member must have a unique _id. Avoid re-using _id values even if no members[n] entry is using that _id in the current configuration.
-    ;; Once set, you cannot change the _id of a member.    
-    ;; :members (->>
-    ;;   members
-    ;;   (map-indexed (fn [i node]
-    ;;                               {:_id  i
-    ;;                                :priority (if (hidden node)
-    ;;                                            0
-    ;;                                            (- (count (:nodes test)) i))
-    ;;                                :votes    (if (hidden node)
-    ;;                                            0
-    ;;                                            1)
-    ;;                                :hidden   (boolean (hidden node))
-    ;;                                :host     (str node ":"
-    ;;                                               (if (config-server? test)
-    ;;                                                 client/config-port
-    ;;                                                 client/shard-port))})))
-    }
-)
+(def member-id-cnt (
+  ref 0
+  :validate (partial <= 0)
+))
 
 
 (defn grace-remove-cleanup
@@ -114,37 +83,74 @@
 )
 
 
-(defn add-with-reconfig
-  ""
-  [test, replica-set-db, nodes, target]
-  (let
-    [
-      primary (->>
-        (cset/difference (set nodes) target) ;; calculate remaining alive nodes
-        (assoc test :nodes) ;; for following code, we only need to check alive nodes
-        (db/primaries replica-set-db)
-        (first) ;; get only the first result
+(defn reconfig-for-adding
+  "Add one member by reconfigurate the replica-set
+  "
+  [test, replica-set-db, primary, port, new-member]
+
+  (with-open [ conn (mcl/open primary port) ] ;; open a connect to the primary node
+    (let
+      [
+        old-config (:config (mcl/admin-command! conn { :replSetGetConfig 1 })) ;; get current configuration
+        id (:_id old-config)
+        old-version (deref version-cnt)
+        new-version (+ old-version 1)
+        old-member-list (:members old-config)
+        ;; Each replica set member must have a unique _id. Avoid re-using _id values even if no members[n] entry is using that _id in the current configuration.
+        new-member-id (+ (deref member-id-cnt) 1)
+        new-member-list (->>
+          ;; construct a new member document
+          ;; For now only add voting members and doesn't consider hidden problem, for simplicity set priority be 1
+          {:_id new-member-id, :votes 1, :host (str new-member ":" port), :priority 1, :hidden false} 
+          ;; add with old member list
+          (conj (vec old-member-list))
+        )
+        ;; Construct new config
+        new-config {:_id id, :version new-version, :members new-member-list}
+      ]
+      (try
+        (mcl/admin-command! conn { :replSetReconfig new-config })
+        (catch Exception e (info "Reconfig should have completed, the error is\n" e) nil)
       )
-      port (if (mdb/config-server? test) mcl/config-port mcl/shard-port)
-
-    ]
-
-    ;; should 
-
-
-    ;; db.adminCommand(
-    ;;   {
-    ;;     replSetGetConfig: 1,
-    ;;     commitmentStatus: <boolean>,
-    ;;     comment: <any>
-    ;;   }
-    ;; )
-    ;; (info "New primary after rs.remove is " primary)
-    ;; ;; (.close (mcl/await-open primary port)) ;; wait for primary to connect
-    (with-open [ conn (mcl/open primary port) ]
-      (info "In add-with-reconfig, Current config:\n\n "  (mcl/admin-command! conn { :replSetGetConfig 1 }) "\n\n") ;; get current config
+      ;; update version-cnt and member-id-cnt
+      (dosync (ref-set version-cnt new-version))
+      (dosync (ref-set member-id-cnt new-member-id))
+      (info "Added a new member: " new-member "via reconfiguration")
     )
-    
+  )
+)
+
+
+(defn add-with-reconfig
+  "Add members 1 by 1 to the replica set via re-configuration.
+  This function should emulate an admin maintaining process (i.e. has identified all failing nodes and performing updating)
+  "
+  [test, replica-set-db, nodes, targets]
+  ;; Assume 
+  ;; 1. /etc/mongod.conf on nodes doesn't need to change, stay as db setup
+  ;; 2. the data directory should have been wiped out, hence MongoDB will use its initial syncing feature to restore the data.
+
+  ;; Start the mongod
+  (jcontrol/on-nodes test targets mdb/start!)
+  ;; Get current config
+  (doall ;; enforce evaluation
+    (for [n targets]
+      (let
+        [
+          live-members (cset/difference (set nodes) targets), ;; members that are alive before add
+          live-x (first live-members)
+          port (if (mdb/config-server? test) mcl/config-port mcl/shard-port)
+        ]
+        ;; On an alive members, get the current primary from the current status of the replicaset 
+        (with-open [ live-conn (mcl/open live-x port) ]
+          (let [cur-prim (mdb/primary live-conn)] ;; this command should be able to run on any alive members
+            (info "In add-with-reconfig, Current primary is: " cur-prim)
+            ;; perform reconfig
+            (reconfig-for-adding test replica-set-db cur-prim port n)
+          )
+        )
+      )
+    )
   )
 )
 
@@ -184,11 +190,6 @@
         ;; update status
         (dosync (ref-set crashing-status (cset/difference removed (set target))))
         (info "Add member " target " new crashing status is " (deref crashing-status))
-        ;; (configure! test node) ;; seems can skip config since it should have been setup properly
-        ;; (start! test node) ;;
-        ;; (join! test node)
-        ;; (jcontrol/on-nodes test target (partial db/kill! replica-set-db))
-
       )
       (info "No adding any member")
     )
@@ -258,7 +259,8 @@
     ;; Setup the nemesis to work with the cluster. Returns the nemesis ready to be invoked.
     (setup! [this test]
       (info "Setting up member nemesis")
-      (dosync (ref-set version-cnt 1))) ;; track the version number
+      (dosync (ref-set version-cnt 1)) ;; track the version number, version start from 1
+      (dosync (ref-set member-id-cnt (- (count (:nodes test)) 1) )) ;; id starts from 0
       this
     )
 
