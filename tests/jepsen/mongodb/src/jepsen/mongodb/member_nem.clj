@@ -17,8 +17,8 @@
 )) 
 
 (def version-cnt (
-  ref #{} 
-  ;; :validator pos? ;; there might need a validator
+  ref 1 
+  :validator pos? ;; there might need a validator
 )) 
 
 (defn construct-config
@@ -39,21 +39,22 @@
     ;; }
     ;; Each replica set member must have a unique _id. Avoid re-using _id values even if no members[n] entry is using that _id in the current configuration.
     ;; Once set, you cannot change the _id of a member.    
-    :members (->>
-      members
-      (map-indexed (fn [i node]
-                                  {:_id  i
-                                   :priority (if (hidden node)
-                                               0
-                                               (- (count (:nodes test)) i))
-                                   :votes    (if (hidden node)
-                                               0
-                                               1)
-                                   :hidden   (boolean (hidden node))
-                                   :host     (str node ":"
-                                                  (if (config-server? test)
-                                                    client/config-port
-                                                    client/shard-port))})))}
+    ;; :members (->>
+    ;;   members
+    ;;   (map-indexed (fn [i node]
+    ;;                               {:_id  i
+    ;;                                :priority (if (hidden node)
+    ;;                                            0
+    ;;                                            (- (count (:nodes test)) i))
+    ;;                                :votes    (if (hidden node)
+    ;;                                            0
+    ;;                                            1)
+    ;;                                :hidden   (boolean (hidden node))
+    ;;                                :host     (str node ":"
+    ;;                                               (if (config-server? test)
+    ;;                                                 client/config-port
+    ;;                                                 client/shard-port))})))
+    }
 )
 
 
@@ -69,37 +70,42 @@
       rm-seq (seq removed)
       ;; live-members (cset/difference (set nodes) removed)
     ]
-    (for [n rm-seq]
-      (let
-        [
-          cur_prim (->>
-            (cset/difference (set nodes) removed) ;; calculate remaining alive nodes
-            (assoc test :nodes) ;; for following code, we only need to check alive nodes
-            (db/primaries replica-set-db)
-            (first));; get only the first result
-        ]
-        (info "current primary is " cur_prim)
-        
-        (with-open [ conn (mcl/open cur_prim port) ]
-          (let
-            [
-              old-config (:config (mcl/admin-command! conn { :replSetGetConfig 1 }))
-              id (:_id old-config)
-              ;; new-version (+ (:version old-config) 1)
-              ;; TODO: get the member list by removing 1 member
-              new-members (vec (filter #(not= (:host %) n) (:members old-config)))
-              ;; TODO: construct new config
-              new-config {:_id id, :members new-members}
-            ]
-            ;; TODO: call reconfig
-            (try
-              ;; the below command should act as rs.remove()
-              ;; This function will disconnect the shell briefly and forces a reconnection
-              ;; the shell will display an error even if this command succeeds
-              (mcl/admin-command! conn { :replSetReconfig new-config })
-              (catch Exception e (info "Reconfig should have completed, the error is\n" e) nil)
+    (doall
+      (for [n rm-seq]
+        (let
+          [
+            cur_prim (->>
+              (cset/difference (set nodes) removed) ;; calculate remaining alive nodes
+              (assoc test :nodes) ;; for following code, we only need to check alive nodes
+              (db/primaries replica-set-db)
+              (first));; get only the first result
+            old-version (deref version-cnt)
+            new-version (+ old-version 1)
+          ]
+          (info "in grace remove, node " n ". current primary is " cur_prim " port is " port)
+          (with-open [ conn (mcl/open cur_prim port) ]
+            (let
+              [
+                old-config (:config (mcl/admin-command! conn { :replSetGetConfig 1 }))
+                id (:_id old-config)
+                ;; new-version (+ (:version old-config) 1)
+                ;; TODO: get the member list by removing 1 member
+                new-members (vec (filter #(not= (mcl/addr->node (:host %)) n) (:members old-config)))
+                ;; TODO: construct new config
+                new-config {:_id id, :version new-version, :members new-members}
+              ]
+              ;; TODO: call reconfig
+              (try
+                ;; the below command should act as rs.remove()
+                ;; This function will disconnect the shell briefly and forces a reconnection
+                ;; the shell will display an error even if this command succeeds
+                (mcl/admin-command! conn { :replSetReconfig new-config })
+                (catch Exception e (info "Reconfig should have completed, the error is\n" e) nil)
+              )
+              ;; TODO: update version cnt
+              (dosync (ref-set version-cnt new-version))
+              (info "cleaned up for " n)
             )
-            (info "cleaned up for " n)
           )
         )
       )
@@ -135,9 +141,9 @@
     ;; )
     ;; (info "New primary after rs.remove is " primary)
     ;; ;; (.close (mcl/await-open primary port)) ;; wait for primary to connect
-    ;; (with-open [ conn (mcl/open primary port) ]
-    ;;   (info "Current config\n: "  (mcl/admin-command! conn { :replSetGetConfig 1 })) ;; get current config
-    ;; )
+    (with-open [ conn (mcl/open primary port) ]
+      (info "In add-with-reconfig, Current config:\n\n "  (mcl/admin-command! conn { :replSetGetConfig 1 }) "\n\n") ;; get current config
+    )
     
   )
 )
@@ -165,9 +171,6 @@
           replica-set-db (:db test),
           nodes (:nodes test)
         ]
-        ;; update status
-        (dosync (ref-set crashing-status (cset/difference removed (set target))))
-        (info "Add member " target " new crashing status is " (deref crashing-status))
         ;; Now add new members step by step
         ;; 1. the kill didn't follow the remove procedure defined by mongodb, so follow here
         (grace-remove-cleanup test replica-set-db nodes removed)
@@ -178,6 +181,9 @@
         ;; 2.2 Add the new member into the replica set
         (add-with-reconfig test replica-set-db nodes target)
 
+        ;; update status
+        (dosync (ref-set crashing-status (cset/difference removed (set target))))
+        (info "Add member " target " new crashing status is " (deref crashing-status))
         ;; (configure! test node) ;; seems can skip config since it should have been setup properly
         ;; (start! test node) ;;
         ;; (join! test node)
@@ -252,7 +258,7 @@
     ;; Setup the nemesis to work with the cluster. Returns the nemesis ready to be invoked.
     (setup! [this test]
       (info "Setting up member nemesis")
-      (dosync (ref-set version-cnt (count (:nodes test)))) ;; track the version number
+      (dosync (ref-set version-cnt 1))) ;; track the version number
       this
     )
 
