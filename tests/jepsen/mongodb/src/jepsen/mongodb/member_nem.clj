@@ -57,21 +57,20 @@
               [
                 old-config (:config (mcl/admin-command! conn { :replSetGetConfig 1 }))
                 id (:_id old-config)
-                ;; new-version (+ (:version old-config) 1)
-                ;; TODO: get the member list by removing 1 member
+                ;; Get the member list by removing 1 member
                 new-members (vec (filter #(not= (mcl/addr->node (:host %)) n) (:members old-config)))
-                ;; TODO: construct new config
+                ;; Construct new config
                 new-config {:_id id, :version new-version, :members new-members}
               ]
-              ;; TODO: call reconfig
-              (try
+              ;; Reconfig to remove
+              ;; (try
                 ;; the below command should act as rs.remove()
                 ;; This function will disconnect the shell briefly and forces a reconnection
                 ;; the shell will display an error even if this command succeeds
                 (mcl/admin-command! conn { :replSetReconfig new-config })
-                (catch Exception e (info "Reconfig should have completed, the error is\n" e) nil)
-              )
-              ;; TODO: update version cnt
+              ;;   (catch Exception e (info "Reconfig should have completed, the error is\n" e) nil)
+              ;; )
+              ;; Update version cnt
               (dosync (ref-set version-cnt new-version))
               (info "cleaned up for " n)
             )
@@ -109,10 +108,10 @@
         new-config {:_id id, :version new-version, :members new-member-list}
       ]
       (info "New member list is: ", new-member-list)
-      (try
+      ;; (try
         (mcl/admin-command! conn { :replSetReconfig new-config })
-        (catch Exception e (info "Reconfig should have completed, the error is\n" e) nil)
-      )
+      ;;   (catch Exception e (info "Reconfig should have completed, the error is\n" e) nil)
+      ;; )
       ;; update version-cnt and member-id-cnt
       (dosync (ref-set version-cnt new-version))
       (dosync (ref-set member-id-cnt new-member-id))
@@ -156,35 +155,94 @@
 )
 
 
+(defn force-reconfig
+  "When there are less than 3 nodes available in the cluster, force a reconfig"
+  [test, replica-set-db, nodes, removed]
+  (let
+    [
+      live-members (cset/difference (set nodes) removed), ;; members that are alive before add
+      live-x (first live-members),
+      port (if (mdb/config-server? test) mcl/config-port mcl/shard-port)
+    ]
+    ;; 2. Start the mongod for all
+    (jcontrol/on-nodes test removed mdb/start!)
+    (info "In FORCE, restarted mongod")
+    ;; 2. Force a reconfig
+    (with-open [ live-conn (mcl/open live-x port) ]
+      (let
+        [
+          cur-config (mcl/admin-command! live-conn { replSetGetConfig: 1 }) ;; get the current configuration
+          id (:_id old-config)
+          old-version (deref version-cnt)
+          new-version (+ old-version 1)
+          old-member-list (:members old-config)
+          ;; Each replica set member must have a unique _id. Avoid re-using _id values even if no members[n] entry is using that _id in the current configuration.
+          old-member-id (deref member-id-cnt)
+          new-member-list (->> (vec removed)
+            ;; Construct a new member document for each new member
+            ;; For now only add voting members and doesn't consider hidden problem, for simplicity set priority be 1
+            (map-indexed (fn [i to-add] {:_id (+ new-member-id-base i 1), :votes 1, :host (str to-add ":" port), :priority 1, :hidden false}))
+            ;; add with old member list
+            (concat (vec old-member-list))
+          )
+          ;; Construct new config with force
+          new-config {:_id id, :version new-version, :members new-member-list, :force true}
+        ]
+        (info "The new FORCE config is:\n" new-config)
+        ;; enforce a reconfig
+        ;; according to MongoDB, the configuration is then propagated to all the surviving members listed in the members array. The replica set will then
+        ;; elects a new primary.
+        (mcl/admin-command! live-conn { :replSetReconfig new-config })
+        ;; update version-cnt and member-id-cnt
+        (dosync (ref-set version-cnt new-version))
+        (dosync (ref-set member-id-cnt (+ old-member-id (count removed))))
+        (info "End of FORCE reconfig. Added " removed "via force reconfiguration.")
+      )
+    )
+  )
+)
+
+
 (defn add-members
   "Add voting members into the replica set.
   As required by MongoDB, assume add even numbers of members.
   "
   [test]
-  (info "joining the replica set" )
+  ;; (info "joining the replica set" )
   (let
     [
       removed (deref crashing-status) ;; removed count should always be even
-      cnt (count removed)
+      removed-cnt (count removed)
+      nodes (:nodes test)
+      remaining-cnt (- (count nodes) removed-cnt)
+      replica-set-db (:db test)
     ]
 
-    (if (pos? cnt)
-      ;; if there are removed members, add some back
+    ;; 1. the kill didn't follow the remove procedure defined by mongodb, so follow here
+    (grace-remove-cleanup test replica-set-db nodes removed)
+    ;; 2.1 Make sure the new member's data directory does not contain data
+    (jcontrol/on-nodes test removed mdb/wipe!)
+    (info "Should have removed old data")
+
+    ;; (if (pos? cnt)
+    (if (>= remaining-cnt 3)
+      ;; if the replica set has more than 3 members, can just add with reconfig
       (let
         [
-          rnd (+ (rand-int cnt) 1),  ;; rnd = 1 ~ cnt, cnt itself should be even
-          num (if (even? rnd) rnd (+ rnd 1)), ;; ensure add > 0 and even
-          target (take num (shuffle removed)),
-          replica-set-db (:db test),
-          nodes (:nodes test)
+          ;; rnd (+ (rand-int cnt) 1),  ;; rnd = 1 ~ cnt, cnt itself should be even
+          ;; num (if (even? rnd) rnd (+ rnd 1)), ;; ensure add > 0 and even
+          ;; target (take num (shuffle removed)),
+          target (set removed), ;; add back all removed
+          ;; replica-set-db (:db test)
+          ;; nodes (:nodes test)
         ]
         ;; Now add new members step by step
         ;; 1. the kill didn't follow the remove procedure defined by mongodb, so follow here
-        (grace-remove-cleanup test replica-set-db nodes removed)
+        ;; (grace-remove-cleanup test replica-set-db nodes removed)
         ;; 2. now (re)-add new members
         ;; 2.1 Make sure the new member's data directory does not contain data
-        (jcontrol/on-nodes test removed mdb/wipe!)
-        (info "Should have removed old data")
+        ;; (jcontrol/on-nodes test removed mdb/wipe!)
+        ;; (info "Should have removed old data")
         ;; 2.2 Add the new member into the replica set
         (add-with-reconfig test replica-set-db nodes target)
 
@@ -192,7 +250,37 @@
         (dosync (ref-set crashing-status (cset/difference removed (set target))))
         (info "Add member " target " new crashing status is " (deref crashing-status))
       )
-      (info "No adding any member")
+      ;; Otherwise, should have no primary now, need to force a reconfiguration
+      (force-reconfig test replica-set-db nodes removed)
+    )
+  )
+)
+
+
+(defn parse-options
+  "Return a set of nodes based on the options
+    :primary         - Choose only the primary node
+    :minority        - Choose a random minority of nodes so that after remove the remaining members >= 3
+    :majority        - Choose a random majority of nodes so that after remove the remaining members < 3
+    ;; TODO:
+    :all             - Choose all nodes
+    :one             - Chooses a single random node
+  "
+  [test, options]
+  (let
+    [
+      nodes (:nodes test)
+      db (:db test)
+      saft-num (- (count nodes) 3)
+      minority-num (+ (rand-int saft-num) 1) ;; = 1 ~ saftnum
+      majority-num (- (count nodes) (+ (rand-int 2) 1)) ;; = total number - (1 ~ 2)
+    ]
+    (case options
+      :primary    (set (db/primaries db test)) ;; here assume all nodes should be available
+      :minority   (take minority-num (shuffle nodes))
+      :majority   (take majority-num (shuffle nodes))
+      ;; :one        (list (rand-nth nodes))
+      ;; :all        nodes
     )
   )
 )
@@ -202,34 +290,37 @@
   "Forcibly remove voting members from the replica set (i.e. kill mongod process) to simulate crashes
   As required by MongoDB, assume remove even numbers of members 
   "
-  [test]
+  [test, options]
   (info "Start removing members")
   (let
     [
       nodes (:nodes test), ;; all nodes in a test
-      removed (deref crashing-status),
-      avail (cset/difference (set nodes) removed), ;; still available nodes
-      avail-cnt (- (count avail) 3) ;; # of nodes that can be removed
+      replica-set-db (:db test)
+      target (parse-options test options)
+      ;; removed (deref crashing-status),
+      ;; avail (cset/difference (set nodes) removed), ;; still available nodes
+      ;; avail-cnt (- (count avail) 3) ;; # of nodes that can be removed
     ]
-    (info "have " avail-cnt "members can be removed. Current crashing status is ", removed)
-    (if (pos? avail-cnt)
-      ;; if there are members available to remove, then do a random remove of even # of members
-      (let
-        [
-          rnd (+ (rand-int avail-cnt) 1), ;; rnd = 1 ~ avail-cnt, where avail-cnt should be even
-          num (if (even? rnd) rnd (+ rnd 1)), ;; ensure remove > 0 and even
-          target (take num (shuffle avail)) ;; randomly choose from nodes
-          replica-set-db (:db test)
-        ]
-        ;; update status
-        (dosync (ref-set crashing-status (cset/union removed (set target))))
-        (info "remove nodes " target " new crashing status is " (deref crashing-status))
+    ;; (info "have " avail-cnt "members can be removed. Current crashing status is ", removed)
+    ;; (if (pos? avail-cnt)
+      ;; if there are members available to remove, then do a random remove of # of members
+      ;; (let
+      ;;   [
+      ;;     ;; rnd (+ (rand-int avail-cnt) 1), ;; rnd = 1 ~ avail-cnt, where avail-cnt should be even
+      ;;     ;; num (if (even? rnd) rnd (+ rnd 1)), ;; ensure remove > 0 and even
+      ;;     ;; num (+ (rand-int avail-cnt) 1), ;; num = 1 ~ avail-cnt
+      ;;     ;; target (take num (shuffle avail)) ;; randomly choose from nodes
+      ;;     replica-set-db (:db test)
+      ;;   ]
         ;; apply kill on all the targets
         (jcontrol/on-nodes test target (partial db/kill! replica-set-db))
-      )
+        ;; update status
+        (dosync (ref-set crashing-status (set target)))
+        (info "remove nodes " target " new crashing status is " (deref crashing-status))
+      ;; )
       ;; otherwise, just not removing any node
-      (info "Not removing any node")
-    )
+      ;; (info "Not removing any node")
+    ;; )
   )
 )
 
@@ -269,8 +360,8 @@
     (invoke! [this test op]
       (assoc op :value
         (case (:f op)
-          :add-members     (add-members test) ;; TODO
-          :remove-members   (remove-members test) ;; TODO
+          :add-members     (add-members test)
+          :remove-members   (remove-members test (:value op))
         ))
     ) 
 
@@ -285,10 +376,9 @@
   [opts]
   (let
     [
-      ;; db (:db opts),
-      ;; nodes (:nodes opts),
-      rm (fn [_ _] {:type :info, :f :remove-members}),
-      ad (fn [_ _] {:type :info, :f :add-members})
+      remove-options (:targets (:member opts) [:primary :minority :majority])
+      rm (fn [_ _] {:type :info, :f :remove-members, :value (rand-nth remove-options)}),
+      ad (fn [_ _] {:type :info, :f :add-members}, :value :all)
     ]
     ;; A simple logic is to remove -> add -> remove -> add .... repeat
     (->>
