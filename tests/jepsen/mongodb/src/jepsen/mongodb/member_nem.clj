@@ -171,7 +171,7 @@
     (with-open [ live-conn (mcl/open live-x port) ]
       (let
         [
-          cur-config (mcl/admin-command! live-conn { replSetGetConfig: 1 }) ;; get the current configuration
+          old-config (mcl/admin-command! live-conn { :replSetGetConfig 1 }) ;; get the current configuration
           id (:_id old-config)
           old-version (deref version-cnt)
           new-version (+ old-version 1)
@@ -181,7 +181,7 @@
           new-member-list (->> (vec removed)
             ;; Construct a new member document for each new member
             ;; For now only add voting members and doesn't consider hidden problem, for simplicity set priority be 1
-            (map-indexed (fn [i to-add] {:_id (+ new-member-id-base i 1), :votes 1, :host (str to-add ":" port), :priority 1, :hidden false}))
+            (map-indexed (fn [i to-add] {:_id (+ old-member-id i 1), :votes 1, :host (str to-add ":" port), :priority 1, :hidden false}))
             ;; add with old member list
             (concat (vec old-member-list))
           )
