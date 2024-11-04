@@ -62,14 +62,7 @@
                 ;; Construct new config
                 new-config {:_id id, :version new-version, :members new-members}
               ]
-              ;; Reconfig to remove
-              ;; (try
-                ;; the below command should act as rs.remove()
-                ;; This function will disconnect the shell briefly and forces a reconnection
-                ;; the shell will display an error even if this command succeeds
-                (mcl/admin-command! conn { :replSetReconfig new-config })
-              ;;   (catch Exception e (info "Reconfig should have completed, the error is\n" e) nil)
-              ;; )
+              (mcl/admin-command! conn { :replSetReconfig new-config })
               ;; Update version cnt
               (dosync (ref-set version-cnt new-version))
               (info "cleaned up for " n)
@@ -164,38 +157,24 @@
       live-x (first live-members),
       port (if (mdb/config-server? test) mcl/config-port mcl/shard-port)
     ]
-    ;; 2. Start the mongod for all
+    ;; 1. the kill didn't follow the remove procedure defined by mongodb, but now has minority of primary
+    ;; 2 Make sure the new member's data directory does not contain data
+    (jcontrol/on-nodes test removed mdb/wipe!)
+    ;; 3 Start the mongod for all
     (jcontrol/on-nodes test removed mdb/start!)
     (info "In FORCE, restarted mongod")
-    ;; 2. Force a reconfig
+    ;; 4. Force a reconfig
     (with-open [ live-conn (mcl/open live-x port) ]
       (let
         [
-          old-config (mcl/admin-command! live-conn { :replSetGetConfig 1 }) ;; get the current configuration
-          id (:_id old-config)
-          old-version (deref version-cnt)
-          new-version (+ old-version 1)
-          old-member-list (:members old-config)
-          ;; Each replica set member must have a unique _id. Avoid re-using _id values even if no members[n] entry is using that _id in the current configuration.
-          old-member-id (deref member-id-cnt)
-          new-member-list (->> (vec removed)
-            ;; Construct a new member document for each new member
-            ;; For now only add voting members and doesn't consider hidden problem, for simplicity set priority be 1
-            (map-indexed (fn [i to-add] {:_id (+ old-member-id i 1), :votes 1, :host (str to-add ":" port), :priority 1, :hidden false}))
-            ;; add with old member list
-            (concat (vec old-member-list))
-          )
-          ;; Construct new config with force
-          new-config {:_id id, :version new-version, :members new-member-list, :force true}
+          old-config (:config (mcl/admin-command! live-conn { :replSetGetConfig 1 })) ;; get the current configuration
         ]
-        (info "The new FORCE config is:\n" new-config)
+        (info "The recovered config via FORCE is:\n" old-config)
         ;; enforce a reconfig
         ;; according to MongoDB, the configuration is then propagated to all the surviving members listed in the members array. The replica set will then
         ;; elects a new primary.
-        (mcl/admin-command! live-conn { :replSetReconfig new-config })
-        ;; update version-cnt and member-id-cnt
-        (dosync (ref-set version-cnt new-version))
-        (dosync (ref-set member-id-cnt (+ old-member-id (count removed))))
+        ;; Don't need to update the config, otherwise the "force" command would complain
+        (mcl/admin-command! live-conn { :replSetReconfig old-config, :force true })
         (info "End of FORCE reconfig. Added " removed "via force reconfiguration.")
       )
     )
@@ -218,31 +197,19 @@
       replica-set-db (:db test)
     ]
 
-    ;; 1. the kill didn't follow the remove procedure defined by mongodb, so follow here
-    (grace-remove-cleanup test replica-set-db nodes removed)
-    ;; 2.1 Make sure the new member's data directory does not contain data
-    (jcontrol/on-nodes test removed mdb/wipe!)
-    (info "Should have removed old data")
-
-    ;; (if (pos? cnt)
     (if (>= remaining-cnt 3)
       ;; if the replica set has more than 3 members, can just add with reconfig
       (let
         [
-          ;; rnd (+ (rand-int cnt) 1),  ;; rnd = 1 ~ cnt, cnt itself should be even
-          ;; num (if (even? rnd) rnd (+ rnd 1)), ;; ensure add > 0 and even
-          ;; target (take num (shuffle removed)),
-          target (set removed), ;; add back all removed
-          ;; replica-set-db (:db test)
-          ;; nodes (:nodes test)
+          target (set removed)
         ]
         ;; Now add new members step by step
         ;; 1. the kill didn't follow the remove procedure defined by mongodb, so follow here
-        ;; (grace-remove-cleanup test replica-set-db nodes removed)
+        (grace-remove-cleanup test replica-set-db nodes removed)
         ;; 2. now (re)-add new members
         ;; 2.1 Make sure the new member's data directory does not contain data
-        ;; (jcontrol/on-nodes test removed mdb/wipe!)
-        ;; (info "Should have removed old data")
+        (jcontrol/on-nodes test removed mdb/wipe!)
+        (info "Should have removed old data")
         ;; 2.2 Add the new member into the replica set
         (add-with-reconfig test replica-set-db nodes target)
 
@@ -273,7 +240,7 @@
       db (:db test)
       saft-num (- (count nodes) 3)
       minority-num (+ (rand-int saft-num) 1) ;; = 1 ~ saftnum
-      majority-num (- (count nodes) (+ (rand-int 2) 1)) ;;(inc (int (Math/floor (/ n 2)))) ;; = total number - 2
+      majority-num (- (count nodes) (+ (rand-int 2) 1)) ;; = total number - 1/2
     ]
     (case options
       :primary    (set (db/primaries db test)) ;; here assume all nodes should be available
