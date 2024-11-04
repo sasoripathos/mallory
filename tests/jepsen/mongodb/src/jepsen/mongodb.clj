@@ -74,7 +74,7 @@
                          ;:kill      {:targets [:all]}
                          :pause     {:targets [nil :one :primaries :majority :all]}
                          :kill      {:targets [nil :one :primaries :majority :all]}
-                         :member    {:targets [:majority]} ;; {:targets [:primary :minority :majority]}
+                         :member    {:targets [:primary :minority :majority]}
                          :interval  (:nemesis-interval opts)})]
     (merge tests/noop-test
            opts
