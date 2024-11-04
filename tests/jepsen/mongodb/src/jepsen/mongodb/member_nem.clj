@@ -273,7 +273,7 @@
       db (:db test)
       saft-num (- (count nodes) 3)
       minority-num (+ (rand-int saft-num) 1) ;; = 1 ~ saftnum
-      majority-num (- (count nodes) (+ (rand-int 2) 1)) ;; = total number - (1 ~ 2)
+      majority-num (- (count nodes) (+ (rand-int 2) 1)) ;;(inc (int (Math/floor (/ n 2)))) ;; = total number - 2
     ]
     (case options
       :primary    (set (db/primaries db test)) ;; here assume all nodes should be available
@@ -297,30 +297,13 @@
       nodes (:nodes test), ;; all nodes in a test
       replica-set-db (:db test)
       target (parse-options test options)
-      ;; removed (deref crashing-status),
-      ;; avail (cset/difference (set nodes) removed), ;; still available nodes
-      ;; avail-cnt (- (count avail) 3) ;; # of nodes that can be removed
     ]
-    ;; (info "have " avail-cnt "members can be removed. Current crashing status is ", removed)
-    ;; (if (pos? avail-cnt)
-      ;; if there are members available to remove, then do a random remove of # of members
-      ;; (let
-      ;;   [
-      ;;     ;; rnd (+ (rand-int avail-cnt) 1), ;; rnd = 1 ~ avail-cnt, where avail-cnt should be even
-      ;;     ;; num (if (even? rnd) rnd (+ rnd 1)), ;; ensure remove > 0 and even
-      ;;     ;; num (+ (rand-int avail-cnt) 1), ;; num = 1 ~ avail-cnt
-      ;;     ;; target (take num (shuffle avail)) ;; randomly choose from nodes
-      ;;     replica-set-db (:db test)
-      ;;   ]
-        ;; apply kill on all the targets
-        (jcontrol/on-nodes test target (partial db/kill! replica-set-db))
-        ;; update status
-        (dosync (ref-set crashing-status (set target)))
-        (info "remove nodes " target " new crashing status is " (deref crashing-status))
-      ;; )
-      ;; otherwise, just not removing any node
-      ;; (info "Not removing any node")
-    ;; )
+    (info "Removing " target " in remove-members")
+    ;; apply kill on all the targets
+    (jcontrol/on-nodes test target (partial db/kill! replica-set-db))
+    ;; update status
+    (dosync (ref-set crashing-status (set target)))
+    (info "remove nodes " target " new crashing status is " (deref crashing-status))
   )
 )
 
@@ -376,9 +359,9 @@
   [opts]
   (let
     [
-      remove-options (:targets (:member opts) [:primary :minority :majority])
+      remove-options (:targets (:member opts) [:primary :minority :majority]),
       rm (fn [_ _] {:type :info, :f :remove-members, :value (rand-nth remove-options)}),
-      ad (fn [_ _] {:type :info, :f :add-members}, :value :all)
+      ad (fn [_ _] {:type :info, :f :add-members, :value :all})
     ]
     ;; A simple logic is to remove -> add -> remove -> add .... repeat
     (->>
