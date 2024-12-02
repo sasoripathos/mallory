@@ -159,7 +159,7 @@
     ]
     ;; 1. the kill didn't follow the remove procedure defined by mongodb, but now has minority of primary
     ;; 2 Make sure the new member's data directory does not contain data
-    (jcontrol/on-nodes test removed mdb/wipe!)
+    ;; (jcontrol/on-nodes test removed mdb/wipe!)
     ;; 3 Start the mongod for all
     (jcontrol/on-nodes test removed mdb/start!)
     (info "In FORCE, restarted mongod")
@@ -208,7 +208,7 @@
         (grace-remove-cleanup test replica-set-db nodes removed)
         ;; 2. now (re)-add new members
         ;; 2.1 Make sure the new member's data directory does not contain data
-        (jcontrol/on-nodes test removed mdb/wipe!)
+        ;; (jcontrol/on-nodes test removed mdb/wipe!)
         (info "Should have removed old data")
         ;; 2.2 Add the new member into the replica set
         (add-with-reconfig test replica-set-db nodes target)

@@ -20,10 +20,13 @@
 (def mongos-pid-file (str mongos-dir "/mongos.pid"))
 (def mongos-bin "mongos")
 
+
 (def mongod-dir "/tmp/mongod")
 (def mongod-log-file "/var/log/mongodb/mongod.stdout")
 (def mongod-pid-file (str mongod-dir "/mongod.pid"))
 (def mongod-bin "mongod")
+(def mongod-log-saving "/mgd/log")
+(def mongod-dir-saving "/mgd/dir")
 
 (def database-dir "/var/lib/mongodb")
 
@@ -31,6 +34,7 @@
 (def cov-server "/opt/cov-server/target/release/cov-server")
 (def cov-server-log (str cov-server-dir "/cov-server.log"))
 (def cov-server-pidfile (str cov-server-dir "/cov-server.pid"))
+(def cov-ser-dir-saving "/mgcov/saving")
 
 (def subpackages
   "MongoDB has like five different packages to install; these are the ones we
@@ -99,15 +103,16 @@
   [test node]
   (info "Starting mongod")
   (c/su
-   (c/exec :mkdir :-p mongod-dir)
+    (c/exec :mkdir :-p mongod-dir)
     ;; Wipe out any old data
-   (c/exec :rm :-rf (c/lit (str database-dir "/*")))
-   (cu/start-daemon!
-    {:logfile mongod-log-file
-     :pidfile mongod-pid-file
-     :chdir mongod-dir}
-    (str "/usr/bin/" mongod-bin)
-    :--config "/etc/mongod.conf")))
+    ;;  (c/exec :rm :-rf (c/lit (str database-dir "/*")))
+    ;; move this wipe only to setup
+    (cu/start-daemon!
+      {:logfile mongod-log-file
+      :pidfile mongod-pid-file
+      :chdir mongod-dir}
+      (str "/usr/bin/" mongod-bin)
+      :--config "/etc/mongod.conf")))
 
 (defn stop!
   "Stops the mongodb service"
@@ -123,11 +128,33 @@
         (c/exec :killall :cov-server :|| :true)
         (c/exec :rm :-rf cov-server-dir)))
 
+(defn stop-cov-server-savelog
+  [test node]
+  (info "Stopping cov-server, save the old log")
+  (c/su (cu/stop-daemon! cov-server cov-server-pidfile)
+        (c/exec :killall :cov-server :|| :true)
+        (c/exec :rm :-rf cov-ser-dir-saving)
+        (c/exec :mkdir :-p cov-ser-dir-saving)
+        (c/exec :mv cov-server-dir cov-ser-dir-saving)
+        (c/exec :rm :-rf cov-server-dir)))
+
 (defn wipe!
   "Removes logs and data files"
   [test node]
   (c/su (c/exec :rm :-rf mongos-log-file (c/lit (str mongos-dir "/*")))
         (c/exec :rm :-rf (c/lit (str database-dir "/*")))))
+
+(defn wipe-with-saving!
+  "Removes logs and data files, save logs and data files"
+  [test node]
+  (c/su (c/exec :rm :-rf mongod-log-saving)
+        (c/exec :mkdir :-p mongod-log-saving)
+        (c/exec :mv mongod-log-file mongod-log-saving) ;; these 3 are for mongod log
+        (c/exec :rm :-rf mongod-dir-saving)
+        (c/exec :mkdir :-p mongod-dir-saving)
+        (c/exec :mv mongod-dir mongod-dir-saving) ;; these 3 are for mongod dir
+        (c/exec :rm :-rf mongod-log-file (c/lit (str mongod-dir "/*"))) ;; can remove mongod files now
+        (c/exec :rm :-rf (c/lit (str database-dir "/*"))))) ;; remove all data
 
 ;; Replica sets
 
@@ -285,14 +312,18 @@
       ;; wait to make sure cov-server is ready
       (Thread/sleep 6000)
       (configure! test node)
+      (c/su (c/exec :rm :-rf (c/lit (str database-dir "/*")))) ;; move the clean up specifically in setup
       (start! test node)
       (join! test node))
 
     (teardown! [db test node]
       (stop! test node)
       (Thread/sleep 6000)
-      (stop-cov-server test node)
-      (wipe! test node))
+      ;; (stop-cov-server test node)
+      (stop-cov-server-savelog test node)
+      ;; (wipe! test node)
+      (wipe-with-saving! test node)
+      )
 
     db/LogFiles
     (log-files [db test node]
