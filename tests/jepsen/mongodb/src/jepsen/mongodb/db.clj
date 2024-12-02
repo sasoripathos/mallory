@@ -135,6 +135,7 @@
         (c/exec :killall :cov-server :|| :true)
         (c/exec :rm :-rf cov-ser-dir-saving)
         (c/exec :mkdir :-p cov-ser-dir-saving)
+        (c/exec :mkdir :-p cov-server-dir) ;; try create the source folder in case it doesn't exist
         (c/exec :mv cov-server-dir cov-ser-dir-saving)
         (c/exec :rm :-rf cov-server-dir)))
 
@@ -149,10 +150,13 @@
   [test node]
   (c/su (c/exec :rm :-rf mongod-log-saving)
         (c/exec :mkdir :-p mongod-log-saving)
-        (c/exec :mv mongod-log-file mongod-log-saving) ;; these 3 are for mongod log
+        (c/exec :mkdir :-p "/var/log/mongodb")
+        (c/exec :touch mongod-log-file) ;; try create the source file in case it doesn't exist
+        (c/exec :mv mongod-log-file mongod-log-saving) ;; these 4 are for mongod log
         (c/exec :rm :-rf mongod-dir-saving)
         (c/exec :mkdir :-p mongod-dir-saving)
-        (c/exec :mv mongod-dir mongod-dir-saving) ;; these 3 are for mongod dir
+        (c/exec :mkdir :-p mongod-dir) ;; try create the source folder in case it doesn't exist
+        (c/exec :mv mongod-dir mongod-dir-saving) ;; these 4 are for mongod dir
         (c/exec :rm :-rf mongod-log-file (c/lit (str mongod-dir "/*"))) ;; can remove mongod files now
         (c/exec :rm :-rf (c/lit (str database-dir "/*"))))) ;; remove all data
 
