@@ -105,7 +105,7 @@
                          (->> (:generator workload)
                               (gen/stagger (/ (:rate opts)))
                               (gen/nemesis (gen/phases
-                                              (gen/sleep 5)
+                                              (gen/sleep 10)
                                               (:generator nemesis)
                                             ))
                               (gen/time-limit (:time-limit opts))))})))
