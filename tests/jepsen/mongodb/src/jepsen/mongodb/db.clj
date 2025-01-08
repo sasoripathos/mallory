@@ -98,16 +98,16 @@
   "Starts mongod"
   [test node]
   (info "Starting mongod")
-  (c/su
-   (c/exec :mkdir :-p mongod-dir)
+  (c/su 
+    (c/exec :mkdir :-p mongod-dir)
     ;; Wipe out any old data
-   (c/exec :rm :-rf (c/lit (str database-dir "/*")))
-   (cu/start-daemon!
-    {:logfile mongod-log-file
-     :pidfile mongod-pid-file
-     :chdir mongod-dir}
-    (str "/usr/bin/" mongod-bin)
-    :--config "/etc/mongod.conf")))
+    ;; (c/exec :rm :-rf (c/lit (str database-dir "/*")))
+    (cu/start-daemon!
+      {:logfile mongod-log-file
+      :pidfile mongod-pid-file
+      :chdir mongod-dir}
+      (str "/usr/bin/" mongod-bin)
+      :--config "/etc/mongod.conf")))
 
 (defn stop!
   "Stops the mongodb service"
@@ -285,6 +285,7 @@
       ;; wait to make sure cov-server is ready
       (Thread/sleep 6000)
       (configure! test node)
+      (c/su (c/exec :rm :-rf (c/lit (str database-dir "/*")))) ;; clean specifically in setup
       (start! test node)
       (join! test node))
 
