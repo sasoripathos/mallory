@@ -74,6 +74,7 @@
                          ;:kill      {:targets [:all]}
                          :pause     {:targets [nil :one :primaries :majority :all]}
                          :kill      {:targets [nil :one :primaries :majority :all]}
+                         :member    {:targets [:primary :minority :majority]}
                          :interval  (:nemesis-interval opts)})]
     (merge tests/noop-test
            opts
@@ -104,7 +105,7 @@
                          (->> (:generator workload)
                               (gen/stagger (/ (:rate opts)))
                               (gen/nemesis (gen/phases
-                                              (gen/sleep 5)
+                                              (gen/sleep 10)
                                               (:generator nemesis)
                                             ))
                               (gen/time-limit (:time-limit opts))))})))
